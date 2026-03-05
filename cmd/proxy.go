@@ -46,18 +46,21 @@ func parseSSHConnectionString(connString string) (string, int) {
 }
 
 func spinUpSSHTunnels(connStrings []string) []*Tunnel {
-	args := []string{
-		"-D", strconv.Itoa(masqPort),
-		"-N", "-f",
-		"-o", "ServerAliveInterval=60",
-		"-o", "ServerAliveCountMax=3",
-		"-o", "ExitOnForwardFailure=yes",
-		"-o", "StrictHostKeyChecking=no",
-	}
 
 	var tunnels []*Tunnel
 	for _, connString := range connStrings {
+
+		args := []string{
+			"-D", strconv.Itoa(masqPort),
+			"-N", "-f",
+			"-o", "ServerAliveInterval=60",
+			"-o", "ServerAliveCountMax=3",
+			"-o", "ExitOnForwardFailure=yes",
+			"-o", "StrictHostKeyChecking=no",
+		}
+
 		address, port := parseSSHConnectionString(connString)
+		fmt.Printf("Spinning up SSH Tunnel to %s ...", address)
 		cmd := exec.Command("ssh", append(args, "-p", strconv.Itoa(port), address)...)
 
 		if err := cmd.Start(); err != nil {
@@ -134,7 +137,7 @@ func spinUpIpTablesRules(tunnels []*Tunnel) {
 				"0")
 		}
 
-		fmt.Printf("Applying iptables rule %s \n...", args)
+		fmt.Printf("Applying iptables rule %s ...\n", args)
 
 		cmd := exec.Command("iptables", args...)
 		if err := cmd.Run(); err != nil {
@@ -170,13 +173,16 @@ var proxyCmd = &cobra.Command{
 		// Setup initial masqPort
 		masqPort = 13370
 
-		signals := make(chan os.Signal, 1)
-		signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 		tunnels := spinUpSSHTunnels(SSHConnectionStrings)
 		spinUpIpTablesRules(tunnels)
-		<-signals
-		defer cleanUpIpTablesRules()
-		defer cleanUpSSHTunnels(tunnels)
+		defer func() {
+			cleanUpIpTablesRules()
+			cleanUpSSHTunnels(tunnels)
+		}()
+
+		sigs := make(chan os.Signal, 1)
+		signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+		<-sigs
 
 	},
 }
