@@ -3,3 +3,8 @@ build/
 .idea
 main
 .goreleaser.yaml
+# Added by goreleaser init:
+dist/
+.gitignore
+go.mod
+go.sum
