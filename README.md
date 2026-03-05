@@ -23,8 +23,3 @@ Cleaning up iptables rules all the shit...
 2026/03/04 21:24:44 Cleaning up PID -7032
 2026/03/04 21:24:44 Cleaning up PID -7033
 ```
-
-TODO:
-
-- [ ] Fix killing SSH (it's not working lol)
-- [ ] Test with more than 2 proxies
