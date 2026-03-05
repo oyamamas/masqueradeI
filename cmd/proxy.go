@@ -60,8 +60,6 @@ func spinUpSSHTunnels(connStrings []string) []*Tunnel {
 		"-o", "StrictHostKeyChecking=no",
 	}
 
-	masqPort++
-
 	var tunnels []*Tunnel
 	for _, connString := range connStrings {
 		address, port := parseSSHConnectionString(connString)
@@ -77,6 +75,7 @@ func spinUpSSHTunnels(connStrings []string) []*Tunnel {
 			fmt.Printf("Tunnel died %s. Shit happens...", address)
 		}
 		tunnels = append(tunnels, &Tunnel{PID: cmd.Process.Pid, tunMasqPort: masqPort})
+		masqPort++
 	}
 
 	if len(tunnels) == 0 {
@@ -102,6 +101,16 @@ func spinUpIpTablesRules(tunnels []*Tunnel) {
 
 	// this is blocking op
 	_ = exec.Command("iptables", "-t", "nat", "-N", chainName).Run()
+
+	err := exec.Command("iptables", "-t", "nat", "-A", "OUTPUT",
+		"-d", "127.0.0.1",
+		"-o", "lo",
+		"-p", "tcp",
+		"--dport", strconv.Itoa(facadePort),
+		"-j", chainName).Run()
+	if err != nil {
+		log.Fatalf("Failed to add OUTPUT jump rule: %v", err)
+	}
 
 	for i, tun := range tunnels {
 
@@ -147,7 +156,7 @@ func cleanUpIpTablesRules() {
 		"-j", chainName).Run()
 
 	_ = exec.Command("iptables", "-t", "nat", "-F", chainName).Run()
-	_ = exec.Command("iptabes", "-t", "nat", "-X", chainName).Run()
+	_ = exec.Command("iptables", "-t", "nat", "-X", chainName).Run()
 }
 
 // proxyCmd represents the proxy command
