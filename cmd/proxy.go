@@ -73,6 +73,8 @@ func spinUpSSHTunnels(connStrings []string) []*Tunnel {
 
 		if cmd.Process == nil || cmd.Process.Pid == 0 {
 			fmt.Printf("Tunnel died %s. Shit happens...", address)
+			masqPort++
+			continue
 		}
 		tunnels = append(tunnels, &Tunnel{PID: cmd.Process.Pid, tunMasqPort: masqPort})
 		masqPort++
