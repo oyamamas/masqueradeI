@@ -9,6 +9,7 @@ import (
 	"math/rand/v2"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strconv"
 	"strings"
 	"syscall"
@@ -163,8 +164,11 @@ var proxyCmd = &cobra.Command{
 		// Setup initial masqPort
 		masqPort = 13370
 
+		signals := make(chan os.Signal, 1)
+		signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
 		tunnels := spinUpSSHTunnels(SSHConnectionStrings)
 		spinUpIpTablesRules(tunnels)
+		<-signals
 		defer cleanUpIpTablesRules()
 		defer cleanUpSSHTunnels(tunnels)
 
