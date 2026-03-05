@@ -15,12 +15,7 @@ import (
 	"syscall"
 	"time"
 
-	//"golang.org/x/crypto/ssh"
-	//"net"
-
-	//"github.com/armon/go-socks5"
 	"github.com/spf13/cobra"
-	//"golang.org/x/net/context"
 )
 
 type Tunnel struct {
@@ -99,7 +94,7 @@ func spinUpIpTablesRules(tunnels []*Tunnel) {
 
 	chainName = "MSQI" + strconv.Itoa(rand.IntN((0x270F)+0x3E8)%0x2710)
 
-	fmt.Printf("Creating iptables chain %s", chainName)
+	fmt.Printf("Creating iptables chain %s\n", chainName)
 
 	// this is blocking op
 	_ = exec.Command("iptables", "-t", "nat", "-N", chainName).Run()
