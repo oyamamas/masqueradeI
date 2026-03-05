@@ -60,7 +60,7 @@ func spinUpSSHTunnels(connStrings []string) []*Tunnel {
 		}
 
 		address, port := parseSSHConnectionString(connString)
-		fmt.Printf("Spinning up SSH Tunnel to %s ...", address)
+		fmt.Printf("Spinning up SSH Tunnel to %s ...\n", address)
 		cmd := exec.Command("ssh", append(args, "-p", strconv.Itoa(port), address)...)
 
 		if err := cmd.Start(); err != nil {
@@ -70,7 +70,7 @@ func spinUpSSHTunnels(connStrings []string) []*Tunnel {
 		time.Sleep(800 * time.Millisecond)
 
 		if cmd.Process == nil || cmd.Process.Pid == 0 {
-			fmt.Printf("Tunnel died %s. Shit happens...", address)
+			fmt.Printf("Tunnel died %s. Shit happens...\n", address)
 			masqPort++
 			continue
 		}
@@ -86,10 +86,15 @@ func spinUpSSHTunnels(connStrings []string) []*Tunnel {
 
 func cleanUpSSHTunnels(tunnels []*Tunnel) {
 	for _, t := range tunnels {
-		if t.PID > 0 {
-			_ = syscall.Kill(t.PID, syscall.SIGTERM)
-			log.Printf("Cleaning up PID %d", t.PID)
+		if t.PID <= 0 {
+			continue
+
 		}
+
+		pgid := -t.PID
+
+		_ = syscall.Kill(t.PID, syscall.SIGTERM)
+		log.Printf("Cleaning up PID %d", pgid)
 	}
 }
 
