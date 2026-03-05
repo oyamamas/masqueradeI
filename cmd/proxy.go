@@ -13,13 +13,13 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
 )
 
 type Tunnel struct {
 	PID              int
+	CMD              *exec.Cmd
 	tunMasqPort      int
 	connectionString string
 }
@@ -52,7 +52,7 @@ func spinUpSSHTunnels(connStrings []string) []*Tunnel {
 
 		args := []string{
 			"-D", strconv.Itoa(masqPort),
-			"-N", "-f",
+			"-N",
 			"-o", "ServerAliveInterval=60",
 			"-o", "ServerAliveCountMax=3",
 			"-o", "ExitOnForwardFailure=yes",
@@ -63,18 +63,25 @@ func spinUpSSHTunnels(connStrings []string) []*Tunnel {
 		fmt.Printf("Spinning up SSH Tunnel to %s ...\n", address)
 		cmd := exec.Command("ssh", append(args, "-p", strconv.Itoa(port), address)...)
 
+		cmd.SysProcAttr = &syscall.SysProcAttr{
+			Setpgid: true,
+		}
+
 		if err := cmd.Start(); err != nil {
 			fmt.Printf("Could not spin up SSH Tunnel to %s. Skipping...", address)
 		}
-
-		time.Sleep(800 * time.Millisecond)
 
 		if cmd.Process == nil || cmd.Process.Pid == 0 {
 			fmt.Printf("Tunnel died %s. Shit happens...\n", address)
 			masqPort++
 			continue
 		}
-		tunnels = append(tunnels, &Tunnel{PID: cmd.Process.Pid, tunMasqPort: masqPort})
+		tunnels = append(tunnels, &Tunnel{CMD: cmd, tunMasqPort: masqPort})
+
+		go func(c *exec.Cmd, addr string) {
+			_ = c.Wait()
+		}(cmd, address)
+
 		masqPort++
 	}
 
@@ -86,15 +93,10 @@ func spinUpSSHTunnels(connStrings []string) []*Tunnel {
 
 func cleanUpSSHTunnels(tunnels []*Tunnel) {
 	for _, t := range tunnels {
-		if t.PID <= 0 {
-			continue
-
+		if t.CMD != nil && t.CMD.Process != nil {
+			_ = t.CMD.Process.Signal(os.Interrupt)
 		}
-
-		pgid := -t.PID
-
-		_ = syscall.Kill(t.PID, syscall.SIGTERM)
-		log.Printf("Cleaning up PID %d", pgid)
+		log.Printf("Cleaning up PID %d", t.CMD.Process.Pid)
 	}
 }
 
