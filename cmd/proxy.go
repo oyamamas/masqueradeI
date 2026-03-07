@@ -4,6 +4,7 @@ Copyright © 2026 oyama
 package cmd
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 	"math/rand/v2"
@@ -18,6 +19,7 @@ import (
 )
 
 type Tunnel struct {
+	isAttached       bool // flag if we want use already existing tunnel. --attach flag
 	PID              int
 	CMD              *exec.Cmd
 	tunMasqPort      int
@@ -29,6 +31,7 @@ var (
 	facadePort           int
 	masqPort             int
 	chainName            string
+	externalPorts        []int
 )
 
 func parseSSHConnectionString(connString string) (string, int) {
@@ -48,6 +51,9 @@ func parseSSHConnectionString(connString string) (string, int) {
 func spinUpSSHTunnels(connStrings []string) []*Tunnel {
 
 	var tunnels []*Tunnel
+	/*
+	 * Open new SSH tunnels from flag --ssh
+	 */
 	for _, connString := range connStrings {
 
 		args := []string{
@@ -63,9 +69,9 @@ func spinUpSSHTunnels(connStrings []string) []*Tunnel {
 		fmt.Printf("Spinning up SSH Tunnel to %s ...\n", address)
 		cmd := exec.Command("ssh", append(args, "-p", strconv.Itoa(port), address)...)
 
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Setpgid: true,
-		}
+		//cmd.SysProcAttr = &syscall.SysProcAttr{
+		//	Setpgid: true,
+		//}
 
 		if err := cmd.Start(); err != nil {
 			fmt.Printf("Could not spin up SSH Tunnel to %s. Skipping...", address)
@@ -83,6 +89,31 @@ func spinUpSSHTunnels(connStrings []string) []*Tunnel {
 		}(cmd, address)
 
 		masqPort++
+	}
+
+	/*
+	 * Check if ports from --attach flag are really open
+	 * and create a Tunnel object for them.
+	 */
+	for _, port := range externalPorts {
+		cmd := exec.Command("ss", "-ltn", "sport", "=", strconv.Itoa(port))
+		var out bytes.Buffer
+		cmd.Stdout = &out
+		cmd.Stderr = &out
+
+		err := cmd.Run()
+		if err != nil {
+			continue
+		}
+
+		output := strings.TrimSpace(out.String())
+		lines := strings.Split(output, "\n")
+
+		if len(lines) <= 1 {
+			continue
+		}
+
+		tunnels = append(tunnels, &Tunnel{isAttached: true, tunMasqPort: port})
 	}
 
 	if len(tunnels) == 0 {
@@ -198,4 +229,5 @@ func init() {
 	rootCmd.AddCommand(proxyCmd)
 	proxyCmd.Flags().IntVarP(&facadePort, "port", "p", 1337, "facade (listen) port")
 	proxyCmd.Flags().StringSliceVarP(&SSHConnectionStrings, "ssh", "s", []string{}, "sshstring")
+	proxyCmd.Flags().IntSliceVarP(&externalPorts, "attach", "a", []int{}, "existings ssh tunnels ports to attach")
 }
