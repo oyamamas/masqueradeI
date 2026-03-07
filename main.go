@@ -3,7 +3,7 @@ Copyright © 2026 oyama
 */
 package main
 
-import "masqueradei/cmd"
+import "github.com/oyamamas/masqueradei/cmd"
 
 func main() {
 	cmd.Execute()
