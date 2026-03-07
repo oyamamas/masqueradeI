@@ -82,7 +82,7 @@ func spinUpSSHTunnels(connStrings []string) []*Tunnel {
 			masqPort++
 			continue
 		}
-		tunnels = append(tunnels, &Tunnel{CMD: cmd, tunMasqPort: masqPort})
+		tunnels = append(tunnels, &Tunnel{CMD: cmd, tunMasqPort: masqPort, isAttached: false})
 
 		go func(c *exec.Cmd, addr string) {
 			_ = c.Wait()
