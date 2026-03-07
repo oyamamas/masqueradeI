@@ -1,4 +1,4 @@
-module masqueradei
+module github.com/oyamamas/masqueradei
 
 go 1.25.5
 

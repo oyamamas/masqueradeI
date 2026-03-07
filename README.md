@@ -23,3 +23,18 @@ Cleaning up iptables rules all the shit...
 2026/03/04 21:24:44 Cleaning up PID -7032
 2026/03/04 21:24:44 Cleaning up PID -7033
 ```
+
+### Usage
+```bash
+sudo ./msqi proxy <params>
+```
+- `--ssh/-s` - ssh connection string: `user@host` or `user@host:22` 
+- `--port/-p` - listen port. the one you proxy your traffic to.
+- `--attach/-a` - port of existing ssh tunnel. for instance, I have an active `tsh ssh -D 1337` instance, so I use `--attach 1337` to add this tunnel to round-robin chain.
+
+
+### Installation
+
+```bash
+go install github.com/oyamamas/masqueradei
+```
