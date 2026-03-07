@@ -36,5 +36,5 @@ sudo ./msqi proxy <params>
 ### Installation
 
 ```bash
-go install github.com/oyamamas/masqueradei
+go install github.com/oyamamas/masqueradeI
 ```

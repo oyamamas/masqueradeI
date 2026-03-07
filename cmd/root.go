@@ -11,7 +11,7 @@ import (
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:   "masqueradei",
+	Use:   "masqueradeI",
 	Short: "Round-robin proxy via SSH tunnels",
 }
 
@@ -29,7 +29,7 @@ func init() {
 	// Cobra supports persistent flags, which, if defined here,
 	// will be global for your application.
 
-	// rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.masqueradei.yaml)")
+	// rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is $HOME/.masqueradeI.yaml)")
 
 	// Cobra also supports local flags, which will only run
 	// when this action is called directly.
