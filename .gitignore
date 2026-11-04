@@ -8,4 +8,4 @@ dist/
 .gitignore
 go.mod
 go.sum
-/msqi
+/masqueradeI
