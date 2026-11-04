@@ -1,4 +1,4 @@
-# MSQI (Masquerade I)
+# Masquerade I
 
 A local SOCKS5 proxy that distributes new TCP connections across SSH tunnels.
 
@@ -16,13 +16,13 @@ The original iptables-based idea comes from [TREVORproxy](https://github.com/bla
 ## Installation
 
 ```sh
-go install github.com/oyamamas/msqi@latest
+go install github.com/oyamamas/masqueradeI@latest
 ```
 
-The executable is named `msqi` and is installed in `$(go env GOPATH)/bin` unless `GOBIN` is set. To build from a checkout:
+The executable is named `masqueradeI` and is installed in `$(go env GOPATH)/bin` unless `GOBIN` is set. To build from a checkout:
 
 ```sh
-go build -o build/msqi .
+go build -o build/masqueradeI .
 ```
 
 ## Usage
@@ -30,7 +30,7 @@ go build -o build/msqi .
 Start two tunnels, using an SSH agent for authentication:
 
 ```sh
-sudo env SSH_AUTH_SOCK="$SSH_AUTH_SOCK" ./build/msqi proxy \
+sudo env SSH_AUTH_SOCK="$SSH_AUTH_SOCK" ./build/masqueradeI proxy \
   --port 1337 \
   --ssh user@proxy1 \
   --ssh user@proxy2:2222
@@ -45,7 +45,7 @@ curl --proxy socks5h://127.0.0.1:1337 https://example.com
 Attach an existing proxy, for example one started separately with `tsh ssh -D 1444`:
 
 ```sh
-sudo ./build/msqi proxy --port 1337 --attach 1444
+sudo ./build/masqueradeI proxy --port 1337 --attach 1444
 ```
 
 `--ssh` and `--attach` can be repeated and combined. Attached proxies must accept SOCKS5 without authentication at `127.0.0.1:port`; a listener only on another interface or on `::1` will not work. The facade port must differ from every attached port.

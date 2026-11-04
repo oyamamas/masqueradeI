@@ -1,4 +1,4 @@
-module github.com/oyamamas/msqi
+module github.com/oyamamas/masqueradeI
 
 go 1.25.5
 
