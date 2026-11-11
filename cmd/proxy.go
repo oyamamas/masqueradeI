@@ -10,12 +10,9 @@ import (
 	"io"
 	"log"
 	"net"
-	"os"
 	"os/exec"
 	"os/signal"
-	"runtime"
 	"slices"
-	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -73,38 +70,36 @@ func (w *synchronizedWriter) Write(p []byte) (int, error) {
 	return w.w.Write(p)
 }
 
-func runProxy(ctx context.Context, cfg proxyConfig, output io.Writer, fw *firewall) (err error) {
+func runProxy(ctx context.Context, cfg proxyConfig, output io.Writer) (err error) {
 	if err := cfg.validate(); err != nil {
 		return err
 	}
 	output = &synchronizedWriter{w: output}
 	logger := log.New(output, "", log.LstdFlags)
 
-	// Reserve the facade for this instance, including while its rules are being
-	// prepared. NAT sends established proxy traffic to the actual SOCKS ports.
-	reservation, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.port)))
+	address := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: cfg.port}
+	listener, err := net.ListenTCP("tcp4", address)
 	if err != nil {
-		return fmt.Errorf("reserve proxy port %d: %w", cfg.port, err)
+		return fmt.Errorf("listen on proxy port %d: %w", cfg.port, err)
 	}
-	defer reservation.Close()
-	// Connections arriving before NAT is ready should fail instead of hanging.
+
+	relayCtx, stopRelay := context.WithCancel(ctx)
+	relay := &tcpRelay{}
+	relayDone := make(chan struct{})
+	var relayErr error
 	go func() {
-		for {
-			conn, acceptErr := reservation.Accept()
-			if acceptErr != nil {
-				return
-			}
-			_ = conn.Close()
-		}
+		defer close(relayDone)
+		relayErr = relay.serve(relayCtx, listener)
 	}()
 
 	var owned []*tunnel
 	defer func() {
-		// Cleanup uses its own bounded contexts, even after SIGINT/SIGTERM.
 		if errors.Is(err, context.Canceled) && ctx.Err() != nil {
 			err = nil
 		}
-		err = errors.Join(err, fw.close())
+		stopRelay()
+		_ = listener.Close()
+		<-relayDone
 		for _, tun := range owned {
 			err = errors.Join(err, tun.close())
 		}
@@ -151,9 +146,7 @@ func runProxy(ctx context.Context, cfg proxyConfig, output io.Writer, fw *firewa
 	if len(active) == 0 {
 		return fmt.Errorf("no working SOCKS tunnels: %w", errors.Join(failures...))
 	}
-	if err := fw.install(ctx, tunnelPorts(active)); err != nil {
-		return err
-	}
+	relay.setPorts(tunnelPorts(active))
 	logger.Printf("SOCKS proxy ready at 127.0.0.1:%d (%d tunnels)", cfg.port, len(active))
 
 	// A process exit wakes the session immediately; attached tunnels and live
@@ -177,6 +170,8 @@ func runProxy(ctx context.Context, cfg proxyConfig, output io.Writer, fw *firewa
 		select {
 		case <-ctx.Done():
 			return nil
+		case <-relayDone:
+			return relayErr
 		case failed = <-exited:
 		case <-ticker.C:
 		}
@@ -204,9 +199,7 @@ func runProxy(ctx context.Context, cfg proxyConfig, output io.Writer, fw *firewa
 		if len(remaining) == 0 {
 			return fmt.Errorf("all SOCKS tunnels stopped; proxy shutting down")
 		}
-		if err := fw.replace(ctx, tunnelPorts(remaining)); err != nil {
-			return fmt.Errorf("update active tunnels: %w", err)
-		}
+		relay.setPorts(tunnelPorts(remaining))
 		// Stop owned tunnels removed by a failed health check as well.
 		for _, tun := range active {
 			if !slices.Contains(remaining, tun) {
@@ -251,24 +244,14 @@ func newProxyCommand() *cobra.Command {
 			if err := cfg.validate(); err != nil {
 				return err
 			}
-			if runtime.GOOS != "linux" {
-				return fmt.Errorf("proxy requires Linux with iptables")
-			}
-			if os.Geteuid() != 0 {
-				return fmt.Errorf("proxy requires root privileges; run with sudo")
-			}
-			programs := []string{"iptables", "iptables-restore"}
 			if len(cfg.ssh) > 0 {
-				programs = append(programs, "ssh")
-			}
-			for _, program := range programs {
-				if _, err := exec.LookPath(program); err != nil {
-					return fmt.Errorf("required executable %s: %w", program, err)
+				if _, err := exec.LookPath("ssh"); err != nil {
+					return fmt.Errorf("required executable ssh: %w", err)
 				}
 			}
 			ctx, stop := signal.NotifyContext(cmd.Context(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
-			return runProxy(ctx, cfg, cmd.ErrOrStderr(), newFirewall(cfg.port, runCommand))
+			return runProxy(ctx, cfg, cmd.ErrOrStderr())
 		},
 	}
 	cmd.Flags().IntVarP(&cfg.port, "port", "p", 1337, "local IPv4 SOCKS5 proxy port")

@@ -2,8 +2,8 @@ package cmd
 
 import (
 	"context"
-	"fmt"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -22,14 +22,26 @@ func testConfig(t *testing.T) proxyConfig {
 	return proxyConfig{port: port, startupTimeout: 3 * time.Second, healthInterval: 50 * time.Millisecond}
 }
 
-func waitUpdate(t *testing.T, m *fakeFirewall) string {
+type proxyLogs chan string
+
+func (logs proxyLogs) Write(p []byte) (int, error) {
+	logs <- string(p)
+	return len(p), nil
+}
+
+func waitProxyLog(t *testing.T, logs proxyLogs, message string) {
 	t.Helper()
-	select {
-	case update := <-m.updates:
-		return update
-	case <-time.After(5 * time.Second):
-		t.Fatal("timed out waiting for firewall update")
-		return ""
+	timeout := time.NewTimer(5 * time.Second)
+	defer timeout.Stop()
+	for {
+		select {
+		case line := <-logs:
+			if strings.Contains(line, message) {
+				return
+			}
+		case <-timeout.C:
+			t.Fatalf("timed out waiting for %q", message)
+		}
 	}
 }
 
@@ -73,27 +85,104 @@ func TestProxyConfigValidation(t *testing.T) {
 	}
 }
 
-func TestProxyAttachedTunnelDeathUpdatesRules(t *testing.T) {
-	first := socksListener(t, [2]byte{5, 0})
-	second := socksListener(t, [2]byte{5, 0})
+func relayTestBackend(t *testing.T, name string) net.Listener {
+	t.Helper()
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+				var greeting [3]byte
+				if _, err := io.ReadFull(conn, greeting[:]); err != nil || greeting != [3]byte{5, 1, 0} {
+					return
+				}
+				if _, err := conn.Write([]byte{5, 0}); err != nil {
+					return
+				}
+				// Reply only after EOF so this also exercises TCP half-close.
+				if payload, err := io.ReadAll(conn); err == nil && len(payload) > 0 {
+					_, _ = io.WriteString(conn, name+":"+string(payload))
+				}
+			}()
+		}
+	}()
+	return listener
+}
+
+func connectTestProxy(t *testing.T, port int) *net.TCPConn {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if err := conn.SetDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.Write([]byte{5, 1, 0}); err != nil {
+		t.Fatal(err)
+	}
+	var reply [2]byte
+	if _, err := io.ReadFull(conn, reply[:]); err != nil || reply != [2]byte{5, 0} {
+		t.Fatalf("SOCKS greeting failed: %v, %v", reply, err)
+	}
+	return conn.(*net.TCPConn)
+}
+
+func assertRelayedTo(t *testing.T, conn *net.TCPConn, backend string) {
+	t.Helper()
+	defer conn.Close()
+	const payload = "proxy payload"
+	if _, err := io.WriteString(conn, payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	reply, err := io.ReadAll(conn)
+	if err != nil || string(reply) != backend+":"+payload {
+		t.Fatalf("want reply from %s, got %q, %v", backend, reply, err)
+	}
+}
+
+func TestProxyBalancesAndRemovesFailedAttachedTunnel(t *testing.T) {
+	first := relayTestBackend(t, "first")
+	second := relayTestBackend(t, "second")
 	cfg := testConfig(t)
 	cfg.attach = []int{listenerPort(first), listenerPort(second)}
-	m := newFakeFirewall()
+	logs := make(proxyLogs, 32)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- runProxy(ctx, cfg, io.Discard, newFirewall(cfg.port, m.run)) }()
-	waitUpdate(t, m)
-	_ = first.Close()
-	updated := waitUpdate(t, m)
-	if strings.Contains(updated, "127.0.0.1:"+strconv.Itoa(cfg.attach[0])) || strings.Count(updated, "-j DNAT") != 1 {
-		t.Fatalf("dead tunnel remained in rules: %s", updated)
+	go func() { done <- runProxy(ctx, cfg, logs) }()
+	waitProxyLog(t, logs, "(2 tunnels)")
+	for _, backend := range []string{"first", "second", "first", "second"} {
+		assertRelayedTo(t, connectTestProxy(t, cfg.port), backend)
 	}
+	established := connectTestProxy(t, cfg.port)
+	_ = first.Close()
+	waitProxyLog(t, logs, "Balancing across 1 remaining tunnels")
+	assertRelayedTo(t, established, "first")
+	for range 3 {
+		assertRelayedTo(t, connectTestProxy(t, cfg.port), "second")
+	}
+	idle := connectTestProxy(t, cfg.port)
 	cancel()
 	if err := waitProxy(t, done); err != nil {
 		t.Fatal(err)
 	}
-	m.assertClean(t)
+	if _, err := idle.Read(make([]byte, 1)); err != io.EOF {
+		t.Fatalf("expected idle session to close on shutdown, got %v", err)
+	}
 	if err := probeSOCKS(context.Background(), cfg.attach[1]); err != nil {
 		t.Fatalf("attached tunnel was stopped: %v", err)
 	}
@@ -103,34 +192,15 @@ func TestProxyAllAttachedTunnelsFail(t *testing.T) {
 	listener := socksListener(t, [2]byte{5, 0})
 	cfg := testConfig(t)
 	cfg.attach = []int{listenerPort(listener)}
-	m := newFakeFirewall()
+	logs := make(proxyLogs, 32)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- runProxy(ctx, cfg, io.Discard, newFirewall(cfg.port, m.run)) }()
-	waitUpdate(t, m)
+	go func() { done <- runProxy(ctx, cfg, logs) }()
+	waitProxyLog(t, logs, "SOCKS proxy ready")
 	_ = listener.Close()
 	if err := waitProxy(t, done); err == nil || !strings.Contains(err.Error(), "all SOCKS tunnels stopped") {
 		t.Fatalf("unexpected result: %v", err)
-	}
-	m.assertClean(t)
-}
-
-func TestProxyFirewallFailureRollsBackAndStopsSSH(t *testing.T) {
-	for _, failure := range []string{"restore", "-A"} {
-		t.Run(failure, func(t *testing.T) {
-			dir := mockSSH(t)
-			cfg := testConfig(t)
-			cfg.ssh = []string{"ready.test"}
-			m := newFakeFirewall()
-			m.fail = failure
-			err := runProxy(context.Background(), cfg, io.Discard, newFirewall(cfg.port, m.run))
-			if err == nil {
-				t.Fatal("expected firewall error")
-			}
-			m.assertClean(t)
-			assertChildStopped(t, dir, "ready.test")
-		})
 	}
 }
 
@@ -138,26 +208,17 @@ func TestProxyDoesNotPublishFailedSSH(t *testing.T) {
 	mockSSH(t)
 	cfg := testConfig(t)
 	cfg.ssh = []string{"fail.test"}
-	m := newFakeFirewall()
-	if err := runProxy(context.Background(), cfg, io.Discard, newFirewall(cfg.port, m.run)); err == nil {
+	if err := runProxy(context.Background(), cfg, io.Discard); err == nil || !strings.Contains(err.Error(), "no working SOCKS tunnels") {
 		t.Fatal("expected no working tunnels error")
 	}
-	if len(m.calls) != 0 {
-		t.Fatalf("published failed tunnel: %v", m.calls)
-	}
-	m.assertClean(t)
 }
 
 func TestProxyRejectsNonSOCKSAttachedPort(t *testing.T) {
 	listener := socksListener(t, [2]byte{'H', 'T'})
 	cfg := testConfig(t)
 	cfg.attach = []int{listenerPort(listener)}
-	m := newFakeFirewall()
-	if err := runProxy(context.Background(), cfg, io.Discard, newFirewall(cfg.port, m.run)); err == nil {
+	if err := runProxy(context.Background(), cfg, io.Discard); err == nil {
 		t.Fatal("accepted non-SOCKS tunnel")
-	}
-	if len(m.calls) != 0 {
-		t.Fatal("changed firewall before validating tunnel")
 	}
 }
 
@@ -166,12 +227,8 @@ func TestProxyRejectsOccupiedFacade(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.port = listenerPort(listener)
 	cfg.ssh = []string{"host"}
-	m := newFakeFirewall()
-	if err := runProxy(context.Background(), cfg, io.Discard, newFirewall(cfg.port, m.run)); err == nil {
+	if err := runProxy(context.Background(), cfg, io.Discard); err == nil || !strings.Contains(err.Error(), "listen on proxy port") {
 		t.Fatal("accepted an occupied facade port")
-	}
-	if len(m.calls) != 0 {
-		t.Fatal("modified firewall before detecting occupied port")
 	}
 }
 
@@ -180,15 +237,12 @@ func TestProxySSHExitRemovesDestination(t *testing.T) {
 	cfg := testConfig(t)
 	cfg.ssh = []string{"first.test", "second.test"}
 	cfg.healthInterval = time.Hour
-	m := newFakeFirewall()
+	logs := make(proxyLogs, 32)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- runProxy(ctx, cfg, io.Discard, newFirewall(cfg.port, m.run)) }()
-	initial := waitUpdate(t, m)
-	if strings.Count(initial, "-j DNAT") != 2 {
-		t.Fatal(initial)
-	}
+	go func() { done <- runProxy(ctx, cfg, logs) }()
+	waitProxyLog(t, logs, "(2 tunnels)")
 	data, err := os.ReadFile(filepath.Join(dir, "first.test.pid"))
 	if err != nil {
 		t.Fatal(err)
@@ -205,15 +259,16 @@ func TestProxySSHExitRemovesDestination(t *testing.T) {
 	if err := process.Signal(syscall.SIGTERM); err != nil {
 		t.Fatal(err)
 	}
-	updated := waitUpdate(t, m)
-	if strings.Count(updated, "-j DNAT") != 1 {
-		t.Fatalf("failed SSH remained eligible: %s", updated)
+	waitProxyLog(t, logs, "Balancing across 1 remaining tunnels")
+	for range 3 {
+		if err := probeSOCKS(ctx, cfg.port); err != nil {
+			t.Fatalf("proxy failed to use remaining SSH tunnel: %v", err)
+		}
 	}
 	cancel()
 	if err := waitProxy(t, done); err != nil {
 		t.Fatal(err)
 	}
-	m.assertClean(t)
 	assertChildStopped(t, dir, "first.test")
 	assertChildStopped(t, dir, "second.test")
 }
@@ -222,11 +277,10 @@ func TestProxyCancellationDuringStartup(t *testing.T) {
 	dir := mockSSH(t)
 	cfg := testConfig(t)
 	cfg.ssh = []string{"hang.test"}
-	m := newFakeFirewall()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- runProxy(ctx, cfg, io.Discard, newFirewall(cfg.port, m.run)) }()
+	go func() { done <- runProxy(ctx, cfg, io.Discard) }()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		if _, err := os.Stat(filepath.Join(dir, "hang.test.pid")); err == nil {
@@ -241,57 +295,5 @@ func TestProxyCancellationDuringStartup(t *testing.T) {
 	if err := waitProxy(t, done); err != nil {
 		t.Fatal(err)
 	}
-	m.assertClean(t)
 	assertChildStopped(t, dir, "hang.test")
-}
-
-func TestProxyCancellationAfterChainCreationRollsBack(t *testing.T) {
-	listener := socksListener(t, [2]byte{5, 0})
-	cfg := testConfig(t)
-	cfg.attach = []int{listenerPort(listener)}
-	m := newFakeFirewall()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	runner := func(ctx context.Context, program, input string, args ...string) error {
-		err := m.run(ctx, program, input, args...)
-		if program == "iptables" && len(args) > 4 && args[4] == "-N" && err == nil {
-			cancel()
-		}
-		return err
-	}
-	if err := runProxy(ctx, cfg, io.Discard, newFirewall(cfg.port, runner)); err != nil {
-		t.Fatal(err)
-	}
-	m.assertClean(t)
-}
-
-func TestProxyRuntimeUpdateFailureCleansUp(t *testing.T) {
-	first := socksListener(t, [2]byte{5, 0})
-	second := socksListener(t, [2]byte{5, 0})
-	cfg := testConfig(t)
-	cfg.attach = []int{listenerPort(first), listenerPort(second)}
-	m := newFakeFirewall()
-	restores := 0
-	runner := func(ctx context.Context, program, input string, args ...string) error {
-		if program == "iptables-restore" {
-			restores++
-			if restores == 2 {
-				return fmt.Errorf("injected runtime update failure")
-			}
-		}
-		return m.run(ctx, program, input, args...)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, 1)
-	go func() { done <- runProxy(ctx, cfg, io.Discard, newFirewall(cfg.port, runner)) }()
-	waitUpdate(t, m)
-	_ = first.Close()
-	if err := waitProxy(t, done); err == nil || !strings.Contains(err.Error(), "update active tunnels") {
-		t.Fatalf("runtime firewall failure lost: %v", err)
-	}
-	m.assertClean(t)
-	if err := probeSOCKS(context.Background(), cfg.attach[1]); err != nil {
-		t.Fatalf("external tunnel was stopped: %v", err)
-	}
 }
